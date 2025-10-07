@@ -19,7 +19,7 @@ class BurpExtender(IBurpExtender, ITab):
         bash_panel = JPanel()
         bash_panel.setLayout(BorderLayout())
         
-        bash_label = JLabel("Paste the cURL request in bash format")
+        bash_label = JLabel("Paste the cURL request in bash format (Linux)")
         bash_label.setFont(bash_label.getFont().deriveFont(Font.BOLD))
         bash_label.setHorizontalAlignment(JLabel.CENTER)
         bash_label.setPreferredSize(Dimension(400, 50))
@@ -44,7 +44,7 @@ class BurpExtender(IBurpExtender, ITab):
         cmd_panel = JPanel()
         cmd_panel.setLayout(BorderLayout())
         
-        cmd_label = JLabel("Paste the cURL request in cmd format")
+        cmd_label = JLabel("Paste the cURL request in cmd format (Windows)")
         cmd_label.setFont(cmd_label.getFont().deriveFont(Font.BOLD))
         cmd_label.setHorizontalAlignment(JLabel.CENTER)
         cmd_label.setPreferredSize(Dimension(400, 50))
