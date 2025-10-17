@@ -12,7 +12,7 @@ class BurpExtender(IBurpExtender, ITab):
         self._callbacks = callbacks
         self._helpers = callbacks.getHelpers()
         
-        callbacks.setExtensionName("cURL to Repeater")
+        callbacks.setExtensionName("cURL to Repeater(Beta)")
         
         self._panel = JPanel()
         self._panel.setLayout(GridLayout(1, 2))
