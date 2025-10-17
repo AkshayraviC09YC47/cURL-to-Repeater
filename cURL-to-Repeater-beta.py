@@ -101,6 +101,14 @@ class BurpExtender(IBurpExtender, ITab):
     def clearCmdTextArea(self, event):
         self._cmd_text_area.setText("")
     
+    def clean_curl_command(self, curl_command):
+        """Remove line continuations and normalize spacing"""
+        # Remove backslash line continuations
+        curl_command = curl_command.replace('\\\n', ' ').replace('\\\r\n', ' ')
+        # Normalize whitespace
+        curl_command = re.sub(r'\s+', ' ', curl_command)
+        return curl_command.strip()
+    
     def detect_content_type(self, headers):
         """Extract Content-Type from headers"""
         for header in headers:
@@ -117,19 +125,17 @@ class BurpExtender(IBurpExtender, ITab):
         
         # Handle URL-encoded data
         if 'application/x-www-form-urlencoded' in content_type_lower:
-            # Data is already in the correct format from curl
             return data
         
         # Handle JSON
         elif 'application/json' in content_type_lower:
-            # Validate and pretty-print if needed
             try:
                 json_obj = json.loads(data)
-                return data  # Return as-is if valid
+                return data
             except:
                 return data
         
-        # Handle XML (both application/xml and text/xml)
+        # Handle XML
         elif 'xml' in content_type_lower:
             return data
         
@@ -140,16 +146,13 @@ class BurpExtender(IBurpExtender, ITab):
         
         # Handle multipart form data
         elif 'multipart/' in content_type_lower:
-            # Multipart data should already be properly formatted in curl
             return data
         
-        # Handle binary data (PDF, ZIP, images, audio, video, octet-stream)
+        # Handle binary data
         elif any(t in content_type_lower for t in ['application/pdf', 'application/zip', 
                                                      'application/octet-stream',
                                                      'image/', 'audio/', 'video/']):
-            # Check if data is base64 encoded
             try:
-                # Try to decode if it looks like base64
                 if re.match(r'^[A-Za-z0-9+/]*={0,2}$', data.replace('\n', '').replace('\r', '')):
                     decoded = base64.b64decode(data)
                     return decoded
@@ -159,123 +162,151 @@ class BurpExtender(IBurpExtender, ITab):
         
         return data
     
-    def parse_curl_command(self, curl_command, format):
-        """Enhanced parser supporting all content types"""
+    def extract_url_from_curl(self, curl_command):
+        """Extract URL from curl command - supports multiple formats"""
+        # Try standard format: curl 'URL' or curl "URL"
+        url_match = re.search(r'curl\s+[\'\"]?(https?://[^\s\'\"]+)[\'\"]?', curl_command)
+        if url_match:
+            return url_match.group(1)
         
-        # Parse based on format (bash or cmd)
+        # Try ANSI-C quoting format: $'URL' at the end
+        url_match = re.search(r'\$[\'\"]https?://[^\s\'\"]+[\'\"]', curl_command)
+        if url_match:
+            url = url_match.group(0)
+            # Remove $' or $" prefix and ' or " suffix
+            url = re.sub(r'^\$[\'\"](.*)[\'"]$', r'\1', url)
+            return url
+        
+        # Try without quotes at the end
+        url_match = re.search(r'(https?://[^\s]+)$', curl_command)
+        if url_match:
+            return url_match.group(1)
+        
+        return None
+    
+    def extract_method_from_curl(self, curl_command):
+        """Extract HTTP method from curl command"""
+        # Try standard -X format
+        method_match = re.search(r'-X\s+[\'\"]?(GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD)[\'\"]?', curl_command, re.IGNORECASE)
+        if method_match:
+            return method_match.group(1).upper()
+        
+        # Try ANSI-C quoting format: -X $'METHOD'
+        method_match = re.search(r'-X\s+\$[\'\"]?(GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD)[\'\"]?', curl_command, re.IGNORECASE)
+        if method_match:
+            return method_match.group(1).upper()
+        
+        # Default based on data presence
+        if '--data' in curl_command or '--form' in curl_command:
+            return "POST"
+        
+        return "GET"
+    
+    def extract_headers_from_curl(self, curl_command, format):
+        """Extract headers from curl command - supports multiple quoting styles"""
+        headers = []
+        
         if format == "bash":
-            url_match = re.search(r'curl\s+[\'"]?(https?://[^\s\'"]+)[\'"]?', curl_command)
-            if not url_match:
-                return None, None
+            # Standard format: -H 'header' or -H "header"
+            headers.extend(re.findall(r'-H\s+[\'"]([^\'"]+)[\'"]', curl_command))
             
-            url = url_match.group(1)
-            method = "GET"
-            headers = []
-            data = None
-            binary_data = None
+            # ANSI-C quoting format: -H $'header'
+            ansi_headers = re.findall(r'-H\s+\$[\'"]([^\'"]+)[\'"]', curl_command)
+            headers.extend(ansi_headers)
             
-            # Extract method
-            method_match = re.search(r'-X\s+[\'"]?(GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD)[\'"]?', curl_command, re.IGNORECASE)
-            if method_match:
-                method = method_match.group(1).upper()
-            elif '--data' in curl_command or '--form' in curl_command:
-                method = "POST"
-            
-            # Extract headers
-            headers = re.findall(r'-H\s+[\'"]([^\'"]+)[\'"]', curl_command)
-            
-            # Extract data (multiple formats)
-            # --data-raw, --data, --data-binary, -d
+        elif format == "cmd":
+            # CMD format: -H "header"
+            headers.extend(re.findall(r'-H\s+"([^"]+)"', curl_command))
+        
+        return headers
+    
+    def extract_data_from_curl(self, curl_command, format):
+        """Extract data from curl command"""
+        data = None
+        
+        if format == "bash":
+            # Try various data formats
+            # --data-raw with quotes
             data_match = re.search(r'--data-raw\s+[\'"](.+?)[\'"]', curl_command, re.DOTALL)
             if not data_match:
+                # --data-binary with quotes
                 data_match = re.search(r'--data-binary\s+[\'"](.+?)[\'"]', curl_command, re.DOTALL)
             if not data_match:
+                # --data with quotes
                 data_match = re.search(r'--data\s+[\'"](.+?)[\'"]', curl_command, re.DOTALL)
             if not data_match:
+                # -d with quotes
                 data_match = re.search(r'-d\s+[\'"](.+?)[\'"]', curl_command, re.DOTALL)
+            if not data_match:
+                # ANSI-C quoting: --data-raw $'...'
+                data_match = re.search(r'--data-raw\s+\$[\'"](.+?)[\'"]', curl_command, re.DOTALL)
+            if not data_match:
+                # ANSI-C quoting: --data $'...'
+                data_match = re.search(r'--data\s+\$[\'"](.+?)[\'"]', curl_command, re.DOTALL)
             
             if data_match:
                 data = data_match.group(1)
             
-            # Extract form data (multipart)
-            form_matches = re.findall(r'--form\s+[\'"]([^\'"]+)[\'"]', curl_command)
-            if form_matches:
-                # Build multipart form data
-                boundary = "----WebKitFormBoundary" + "".join([str(ord(c)) for c in url[:16]])
-                multipart_data = ""
-                for form_field in form_matches:
-                    multipart_data += "--%s\r\n" % boundary
-                    if '=@' in form_field:
-                        # File upload
-                        field_name, file_path = form_field.split('=@', 1)
-                        multipart_data += 'Content-Disposition: form-data; name="%s"; filename="%s"\r\n' % (field_name, file_path.split('/')[-1])
-                        multipart_data += 'Content-Type: application/octet-stream\r\n\r\n'
-                        multipart_data += '[FILE_CONTENT_HERE]\r\n'
-                    else:
-                        # Regular field
-                        field_name, field_value = form_field.split('=', 1)
-                        multipart_data += 'Content-Disposition: form-data; name="%s"\r\n\r\n' % field_name
-                        multipart_data += '%s\r\n' % field_value
-                multipart_data += "--%s--\r\n" % boundary
-                data = multipart_data
-                # Add multipart content-type header if not present
-                has_content_type = any('content-type' in h.lower() for h in headers)
-                if not has_content_type:
-                    headers.append('Content-Type: multipart/form-data; boundary=%s' % boundary)
-        
         elif format == "cmd":
-            url_match = re.search(r'curl\s+"(https?://[^"]+)"', curl_command)
-            if not url_match:
-                url_match = re.search(r'curl\s+(https?://[^\s]+)', curl_command)
-            if not url_match:
-                return None, None
-            
-            url = url_match.group(1)
-            method = "GET"
-            headers = []
-            data = None
-            
-            # Extract method
-            method_match = re.search(r'-X\s+"?(GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD)"?', curl_command, re.IGNORECASE)
-            if method_match:
-                method = method_match.group(1).upper()
-            elif '--data' in curl_command or '--form' in curl_command:
-                method = "POST"
-            
-            # Extract headers
-            headers = re.findall(r'-H\s+"([^"]+)"', curl_command)
-            
-            # Extract data
+            # CMD format
             data_match = re.search(r'--data(?:-raw|-binary)?\s+"(.+?)"', curl_command, re.DOTALL)
             if not data_match:
                 data_match = re.search(r'-d\s+"(.+?)"', curl_command, re.DOTALL)
             
             if data_match:
                 data = data_match.group(1)
-            
-            # Extract form data
-            form_matches = re.findall(r'--form\s+"([^"]+)"', curl_command)
-            if form_matches:
-                boundary = "----WebKitFormBoundary" + "".join([str(ord(c)) for c in url[:16]])
-                multipart_data = ""
-                for form_field in form_matches:
-                    multipart_data += "--%s\r\n" % boundary
-                    if '=@' in form_field:
-                        field_name, file_path = form_field.split('=@', 1)
-                        multipart_data += 'Content-Disposition: form-data; name="%s"; filename="%s"\r\n' % (field_name, file_path.split('\\')[-1])
-                        multipart_data += 'Content-Type: application/octet-stream\r\n\r\n'
-                        multipart_data += '[FILE_CONTENT_HERE]\r\n'
-                    else:
+        
+        return data
+    
+    def parse_curl_command(self, curl_command, format):
+        """Enhanced parser supporting multiple curl formats"""
+        
+        # Clean the command first
+        curl_command = self.clean_curl_command(curl_command)
+        
+        # Extract URL
+        url = self.extract_url_from_curl(curl_command)
+        if not url:
+            return None, None
+        
+        # Extract method
+        method = self.extract_method_from_curl(curl_command)
+        
+        # Extract headers
+        headers = self.extract_headers_from_curl(curl_command, format)
+        
+        # Extract data
+        data = self.extract_data_from_curl(curl_command, format)
+        
+        # Handle form data (multipart)
+        form_pattern = r'--form\s+[\'\"]?([^\'\"]+)[\'\"]?'
+        form_matches = re.findall(form_pattern, curl_command)
+        if form_matches:
+            boundary = "----WebKitFormBoundary" + "".join([str(ord(c)) for c in url[:16]])
+            multipart_data = ""
+            for form_field in form_matches:
+                multipart_data += "--%s\r\n" % boundary
+                if '=@' in form_field:
+                    # File upload
+                    field_name, file_path = form_field.split('=@', 1)
+                    filename = file_path.split('/')[-1].split('\\')[-1]
+                    multipart_data += 'Content-Disposition: form-data; name="%s"; filename="%s"\r\n' % (field_name, filename)
+                    multipart_data += 'Content-Type: application/octet-stream\r\n\r\n'
+                    multipart_data += '[FILE_CONTENT_HERE]\r\n'
+                else:
+                    # Regular field
+                    if '=' in form_field:
                         field_name, field_value = form_field.split('=', 1)
                         multipart_data += 'Content-Disposition: form-data; name="%s"\r\n\r\n' % field_name
                         multipart_data += '%s\r\n' % field_value
-                multipart_data += "--%s--\r\n" % boundary
-                data = multipart_data
-                has_content_type = any('content-type' in h.lower() for h in headers)
-                if not has_content_type:
-                    headers.append('Content-Type: multipart/form-data; boundary=%s' % boundary)
+            multipart_data += "--%s--\r\n" % boundary
+            data = multipart_data
+            # Add multipart content-type header if not present
+            has_content_type = any('content-type' in h.lower() for h in headers)
+            if not has_content_type:
+                headers.append('Content-Type: multipart/form-data; boundary=%s' % boundary)
         
-        # Parse URL
+        # Parse URL components
         parsed_url = re.search(r'(https?)://([^/:]+)(?::(\d+))?(/.*)?', url)
         if not parsed_url:
             return None, None
@@ -293,7 +324,11 @@ class BurpExtender(IBurpExtender, ITab):
         
         # Build HTTP request
         request = "%s %s HTTP/1.1\r\n" % (method, path)
-        request += "Host: %s\r\n" % host
+        
+        # Check if Host header already exists in headers list
+        has_host = any(h.lower().startswith('host:') for h in headers)
+        if not has_host:
+            request += "Host: %s\r\n" % host
         
         # Add headers
         content_type = None
